@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "mik32_hal_spi.h"
 #include "mik32_hal_i2c.h"
+#include "mik32_hal_dma.h"
 
 
 /* DATS (ВСЕ СЛЕДУЮЩИЕ БАЙТЫ будут данными) */
@@ -116,10 +117,12 @@ typedef struct __HAL_SSD1306_InitTypeDef
 typedef struct  __HAL_SSD1306_HandleTypeDef {
     HAL_SSD1306_InitTypeDef Init;                       /**< SSD1306 parameters. */
     uint8_t SSD1306_Buffer[SSD1306_BUFFER_SIZE + 1];    /**< Data Buffer. */
+    uint8_t DMA_Buffer[1024];                           /**< DMA transfer buffer (1024 bytes for full SSD1306 frame). */
     uint16_t CurrentX;                                  /**< The current x position of the cursor. */
     uint16_t CurrentY;                                  /**< The current y position of the cursor. */
     uint8_t Initialized;                                /**< SSD1306 Initialization Flag. */
     uint8_t DisplayOn;                                  /**< SSD1306 Status Flag. */
+    DMA_ChannelHandleTypeDef *hdmatx;                   /**< DMA TX channel handle. */
 } HAL_SSD1306_HandleTypeDef;
 
 /**

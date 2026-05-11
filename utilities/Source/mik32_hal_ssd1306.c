@@ -1,11 +1,65 @@
 /* this module was made on the basis of stm32-ssd1306 library https://github.com/afiskon/stm32-ssd1306 */
-
+#define SSD1306_128x64
 #include "mik32_hal_ssd1306.h"
 #include "mik32_hal_gpio.h"
 #include "mik32_hal_spi.h"
+#include "mik32_hal_i2c.h"
+#include "mik32_hal_dma.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>  // For memcpy
+
+// Forward declaration
+static HAL_StatusTypeDef transmit(HAL_SSD1306_InitTypeDef *ssd1306_init, uint8_t* buffer, size_t buff_size);
+
+/**
+ * @brief Transmit data on the selected interface (DMA-optimized for SPI).
+ */
+
+static HAL_StatusTypeDef transmit_dma(HAL_SSD1306_InitTypeDef *ssd1306_init, 
+                                       HAL_SSD1306_HandleTypeDef *hssd1306,
+                                       uint8_t* buffer, size_t buff_size)
+{
+    if (ssd1306_init->Interface == HAL_I2C)
+    {
+        // Fallback to blocking for I2C
+        return HAL_I2C_Master_Transmit(ssd1306_init->I2c, ssd1306_init->SSD1306_I2C_Addr, buffer, buff_size, I2C_TIMEOUT_DEFAULT);
+    }
+    else if (ssd1306_init->Interface == HAL_SPI && hssd1306->hdmatx != NULL)
+    {
+        size_t data_size = 0;
+        
+        // Copy data to DMA buffer (skip command byte if DATS)
+        if (buffer[0] == DATS)
+        {
+            data_size = buff_size - 1;
+            if (data_size > 1024) data_size = 1024;  // Full SSD1306 frame is 1024 bytes
+            memcpy(hssd1306->DMA_Buffer, buffer + 1, data_size);
+            
+            HAL_GPIO_WritePin(ssd1306_init->SSD1306_CS_Port, ssd1306_init->SSD1306_CS_Pin, GPIO_PIN_LOW);
+            HAL_GPIO_WritePin(ssd1306_init->SSD1306_DC_Port, ssd1306_init->SSD1306_DC_Pin, GPIO_PIN_HIGH); // data
+            
+            // Initiate DMA transfer from DMA_Buffer to SPI TXDATA (entire frame in one transfer)
+            HAL_DMA_Start(hssd1306->hdmatx,
+                         (void*)hssd1306->DMA_Buffer,
+                         (void*)&ssd1306_init->Spi->Instance->TXDATA,
+                         data_size - 1);
+            
+            // Wait for DMA to complete (timeout 1000ms)
+            HAL_StatusTypeDef status = HAL_DMA_Wait(hssd1306->hdmatx, 1000);
+            HAL_GPIO_WritePin(ssd1306_init->SSD1306_CS_Port, ssd1306_init->SSD1306_CS_Pin, GPIO_PIN_HIGH);
+            return status;
+        }
+        
+        // Fallback to blocking for mixed mode
+        return transmit(ssd1306_init, buffer, buff_size);
+    }
+    else
+    {
+        // Fallback to blocking mode if no DMA or wrong interface
+        return transmit(ssd1306_init, buffer, buff_size);
+    }
+}
 
 /**
  * @brief Transmit data on the selected interface.
@@ -17,6 +71,8 @@
  * 
  * @return HAL Status.
  */
+
+
 static HAL_StatusTypeDef transmit(HAL_SSD1306_InitTypeDef *ssd1306_init, uint8_t* buffer, size_t buff_size)
 {
     if (ssd1306_init->Interface == HAL_I2C)
@@ -31,7 +87,7 @@ static HAL_StatusTypeDef transmit(HAL_SSD1306_InitTypeDef *ssd1306_init, uint8_t
             HAL_GPIO_WritePin(ssd1306_init->SSD1306_CS_Port, ssd1306_init->SSD1306_CS_Pin, GPIO_PIN_LOW);
             HAL_GPIO_WritePin(ssd1306_init->SSD1306_DC_Port, ssd1306_init->SSD1306_DC_Pin, GPIO_PIN_HIGH); // data
             status =  HAL_SPI_Transmit(ssd1306_init->Spi, buffer + 1, buff_size - 1, SPI_TIMEOUT_DEFAULT);
-            HAL_GPIO_WritePin(ssd1306_init->SSD1306_CS_Port, ssd1306_init->SSD1306_CS_Pin, GPIO_PIN_LOW);
+            HAL_GPIO_WritePin(ssd1306_init->SSD1306_CS_Port, ssd1306_init->SSD1306_CS_Pin, GPIO_PIN_HIGH);
             return status;
         }
 
@@ -68,6 +124,7 @@ static HAL_StatusTypeDef transmit(HAL_SSD1306_InitTypeDef *ssd1306_init, uint8_t
  * @param ssd1306_init Pointer to SSD1306_InitTypeDef structure, which contains
  * configuration information for the SSD1306 module.
  */
+
 static void GPIO_Init(HAL_SSD1306_InitTypeDef *ssd1306_init)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -95,6 +152,7 @@ static void GPIO_Init(HAL_SSD1306_InitTypeDef *ssd1306_init)
  * @param ssd1306_init Pointer to SSD1306_InitTypeDef structure, which contains
  * configuration information for the SSD1306 module.
  */
+
 static void ssd1306_Reset(HAL_SSD1306_InitTypeDef *ssd1306_init) {
     GPIO_Init(ssd1306_init);
     HAL_GPIO_WritePin(ssd1306_init->SSD1306_CS_Port, ssd1306_init->SSD1306_CS_Pin, GPIO_PIN_HIGH);
@@ -114,6 +172,7 @@ static void ssd1306_Reset(HAL_SSD1306_InitTypeDef *ssd1306_init) {
  * @return HAL Status.
  */
 HAL_StatusTypeDef ssd1306_Init(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t brightness) {
+
     if (ssd1306->Init.Interface == HAL_SPI)
     {
         GPIO_Init(&ssd1306->Init);
@@ -122,7 +181,15 @@ HAL_StatusTypeDef ssd1306_Init(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t brigh
         ssd1306_Reset(&ssd1306->Init);
         // Wait for the screen to boot
         HAL_DelayMs(100);
+    #if 0
+    } else if (ssd1306->Init.Interface == HAL_I2C) {
+
+        //ssd1306_Reset(&ssd1306->Init);
+        // Wait for the screen to boot
+        HAL_DelayMs(100);
+        #endif
     }
+
 
     uint8_t Set_MUX_Ratio, Set_COM_Pins;
     #ifdef SSD1306_128x64
@@ -162,11 +229,14 @@ HAL_StatusTypeDef ssd1306_Init(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t brigh
     }
 
     ssd1306->SSD1306_Buffer[0] = DATS;
+    // ssd1306_Fill(ssd1306, Black);
+    // ssd1306_UpdateScreen(ssd1306);   // ← чистый экран отправлен
     status = ssd1306_SetDisplayOn(ssd1306, 1); //--turn on SSD1306 panel
     if (status != HAL_OK)
     {
         return status;
     }
+
     // Clear screen
     ssd1306_Fill(ssd1306, Black);
     // Flush buffer to screen
@@ -185,7 +255,9 @@ HAL_StatusTypeDef ssd1306_Init(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t brigh
  * configuration information for the SSD1306 module.
  * @param color Color.
  */
+
 void ssd1306_Fill(HAL_SSD1306_HandleTypeDef *ssd1306, HAL_SSD1306_Color color) {
+
     memset(ssd1306->SSD1306_Buffer + 1, (color == Black) ? 0x00 : 0xFF, SSD1306_BUFFER_SIZE);
 }
 
@@ -197,8 +269,16 @@ void ssd1306_Fill(HAL_SSD1306_HandleTypeDef *ssd1306, HAL_SSD1306_Color color) {
  * 
  * @return HAL Status.
  */
+
 HAL_StatusTypeDef ssd1306_UpdateScreen(HAL_SSD1306_HandleTypeDef *ssd1306) {
-    return transmit(&ssd1306->Init, ssd1306->SSD1306_Buffer, SSD1306_BUFFER_SIZE + 1);
+    uint8_t addr_cmds[] = {
+        COM, 0x21, COM, 0x00, COM, 0x7F,  // Column address: 0 to 127
+        COM, 0x22, COM, 0x00, COM, 0x07   // Page address: 0 to 7
+    };
+    HAL_StatusTypeDef status = transmit_dma(&ssd1306->Init, ssd1306, addr_cmds, sizeof(addr_cmds));
+    if (status != HAL_OK) return status;
+
+    return transmit_dma(&ssd1306->Init, ssd1306, ssd1306->SSD1306_Buffer, SSD1306_BUFFER_SIZE + 1);
 }
 
 /**
@@ -210,6 +290,7 @@ HAL_StatusTypeDef ssd1306_UpdateScreen(HAL_SSD1306_HandleTypeDef *ssd1306) {
  * @param y Y coordinate.
  * @param color Pixel color.
  */
+
 void ssd1306_DrawPixel(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x, uint8_t y, HAL_SSD1306_Color color) {
     if(x >= SSD1306_WIDTH || y >= SSD1306_HEIGHT) {
         // Don't write outside the buffer
@@ -233,6 +314,7 @@ void ssd1306_DrawPixel(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x, uint8_t y,
  * @param Font Font structure.
  * @param color Color.
  */
+
 char ssd1306_WriteChar(HAL_SSD1306_HandleTypeDef *ssd1306, char ch, HAL_SSD1306_Font Font, HAL_SSD1306_Color color) {
     uint32_t i, b, j;
     
@@ -278,6 +360,7 @@ char ssd1306_WriteChar(HAL_SSD1306_HandleTypeDef *ssd1306, char ch, HAL_SSD1306_
  * @param Font Font structure.
  * @param color Color.
  */
+
 char ssd1306_WriteString(HAL_SSD1306_HandleTypeDef *ssd1306, char* str, HAL_SSD1306_Font Font, HAL_SSD1306_Color color) {
     while (*str) {
         if (ssd1306_WriteChar(ssd1306, *str, Font, color) != *str) {
@@ -298,6 +381,7 @@ char ssd1306_WriteString(HAL_SSD1306_HandleTypeDef *ssd1306, char* str, HAL_SSD1
  * @param x X coordinate.
  * @param y Y coordinate.
  */
+
 void ssd1306_SetCursor(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x, uint8_t y) {
     ssd1306->CurrentX = x;
     ssd1306->CurrentY = y;
@@ -314,6 +398,7 @@ void ssd1306_SetCursor(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x, uint8_t y)
  * @param y2 Y coordinate of the second vertex.
  * @param color Color.
  */
+
 void ssd1306_Line(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, HAL_SSD1306_Color color) {
     int32_t deltaX = abs(x2 - x1);
     int32_t deltaY = abs(y2 - y1);
@@ -349,6 +434,7 @@ void ssd1306_Line(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x1, uint8_t y1, ui
  * @param par_size Number of vertices.
  * @param color Color.
  */
+
 void ssd1306_Polyline(HAL_SSD1306_HandleTypeDef *ssd1306, const HAL_SSD1306_Vertex *par_vertex, uint16_t par_size, HAL_SSD1306_Color color) {
     uint16_t i;
     if(par_vertex == NULL) {
@@ -369,6 +455,7 @@ void ssd1306_Polyline(HAL_SSD1306_HandleTypeDef *ssd1306, const HAL_SSD1306_Vert
  * 
  * @return Angle in radians.
  */
+
 static float ssd1306_DegToRad(float par_deg) {
     return par_deg * (3.14f / 180.0f);
 }
@@ -380,6 +467,7 @@ static float ssd1306_DegToRad(float par_deg) {
  * 
  * @return Normalize angle in degrees.
  */
+
 static uint16_t ssd1306_NormalizeTo0_360(uint16_t par_deg) {
     uint16_t loc_angle;
     if(par_deg <= 360) {
@@ -403,6 +491,7 @@ static uint16_t ssd1306_NormalizeTo0_360(uint16_t par_deg) {
  * @param sweep Sweep in degree.
  * @param color Color.
  */
+
 void ssd1306_DrawArc(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x, uint8_t y, uint8_t radius, uint16_t start_angle, uint16_t sweep, HAL_SSD1306_Color color) {
     static const uint8_t CIRCLE_APPROXIMATION_SEGMENTS = 36;
     float approx_degree;
@@ -448,6 +537,7 @@ void ssd1306_DrawArc(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x, uint8_t y, u
  * @param sweep Sweep in degree.
  * @param color Color.
  */
+
 void ssd1306_DrawArcWithRadiusLine(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x, uint8_t y, uint8_t radius, uint16_t start_angle, uint16_t sweep, HAL_SSD1306_Color color) {
     const uint32_t CIRCLE_APPROXIMATION_SEGMENTS = 36;
     float approx_degree;
@@ -500,6 +590,7 @@ void ssd1306_DrawArcWithRadiusLine(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x
  * @param par_r Radius.
  * @param color Color.
  */
+
 void ssd1306_DrawCircle(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t par_x, uint8_t par_y, uint8_t par_r, HAL_SSD1306_Color par_color) {
     int32_t x = -par_r;
     int32_t y = 0;
@@ -544,6 +635,7 @@ void ssd1306_DrawCircle(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t par_x, uint8
  * @param par_r Radius.
  * @param color Color.
  */
+
 void ssd1306_FillCircle(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t par_x, uint8_t par_y, uint8_t par_r, HAL_SSD1306_Color par_color) {
     int32_t x = -par_r;
     int32_t y = 0;
@@ -590,6 +682,7 @@ void ssd1306_FillCircle(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t par_x, uint8
  * @param y2 Y coordinate of the second vertex.
  * @param color Color.
  */
+
 void ssd1306_DrawRectangle(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, HAL_SSD1306_Color color) {
     ssd1306_Line(ssd1306, x1,y1,x2,y1,color);
     ssd1306_Line(ssd1306, x2,y1,x2,y2,color);
@@ -610,6 +703,7 @@ void ssd1306_DrawRectangle(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x1, uint8
  * @param y2 Y coordinate of the second vertex.
  * @param color Color.
  */
+
 void ssd1306_FillRectangle(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2, HAL_SSD1306_Color color) {
     uint8_t x_start = ((x1<=x2) ? x1 : x2);
     uint8_t x_end   = ((x1<=x2) ? x2 : x1);
@@ -636,6 +730,7 @@ void ssd1306_FillRectangle(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x1, uint8
  * @param h Height.
  * @param color Color.
  */
+
 void ssd1306_DrawBitmap(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x, uint8_t y, const unsigned char* bitmap, uint8_t w, uint8_t h, HAL_SSD1306_Color color) {
     int16_t byteWidth = (w + 7) / 8; // Bitmap scanline pad = whole byte
     uint8_t byte = 0;
@@ -669,6 +764,7 @@ void ssd1306_DrawBitmap(HAL_SSD1306_HandleTypeDef *ssd1306, uint8_t x, uint8_t y
  * 
  * @return HAL status.
  */
+
 HAL_StatusTypeDef ssd1306_SetContrast(HAL_SSD1306_HandleTypeDef *ssd1306, const uint8_t value) {
     const uint8_t kSetContrastControlRegister = 0x81;
     uint8_t comands[] = {
@@ -688,6 +784,7 @@ HAL_StatusTypeDef ssd1306_SetContrast(HAL_SSD1306_HandleTypeDef *ssd1306, const 
  * 
  * @return HAL status.
  */
+
 HAL_StatusTypeDef ssd1306_SetDisplayOn(HAL_SSD1306_HandleTypeDef *ssd1306, const uint8_t on) {
     uint8_t value[] = {COM, 0};
     if (on) {
@@ -711,6 +808,7 @@ HAL_StatusTypeDef ssd1306_SetDisplayOn(HAL_SSD1306_HandleTypeDef *ssd1306, const
  * 
  * @return Display on/off.
  */
+
 uint8_t ssd1306_GetDisplayOn(HAL_SSD1306_HandleTypeDef *ssd1306) {
     return ssd1306->DisplayOn;
 }
